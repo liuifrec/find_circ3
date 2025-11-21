@@ -2,92 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, TextIO
-from collections import defaultdict
-from typing import Dict
-from typing import Optional
+from typing import Iterable, Iterator, Optional, List, Literal
 
 import logging
-
-from typing import List, Literal
 import pysam
+
+from .hit_accumulator import HitAccumulator
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Public types and containers
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Public configuration & stats containers
-# ---------------------------------------------------------------------------
 JunctionType = Literal["circular", "linear", "other"]
-def _candidate_from_pair(
-    A: AnchorHit,
-    B: AnchorHit,
-    cfg: FindCircConfig,
-) -> Optional[JunctionCandidate]:
-    """
-    Construct a JunctionCandidate from a single (A,B) anchor pair.
-
-    This mirrors the core geometry logic from the original find_circ.py:
-      - anchors must be on the same chromosome and strand,
-      - pairs closer than anchor_size are discarded as overlapping anchors,
-      - reversed orientation pairs → circular candidates,
-      - sequential orientation pairs → linear candidates.
-    """
-
-    # Require same chromosome
-    if A.chrom != B.chrom:
-        return None
-
-    # Require same strand
-    if A.strand != B.strand:
-        return None
-
-    # Distance in genomic coordinates
-    dist = B.pos - A.pos
-    if abs(dist) < cfg.anchor_size:
-        # overlapping anchors; do not form a candidate
-        return None
-
-    A_is_reverse = (A.strand == "-")
-
-    # Decide circular vs linear based on the same conditions as the legacy code:
-    #
-    #   if (A.is_reverse and dist > 0) or (not A.is_reverse and dist < 0):
-    #       # reversed orientation → circRNA
-    #   elif (A.is_reverse and dist < 0) or (not A.is_reverse and dist > 0):
-    #       # sequential → linear
-    #
-    if (A_is_reverse and dist > 0) or (not A_is_reverse and dist < 0):
-        tentative_type: JunctionType = "circular"
-    elif (A_is_reverse and dist < 0) or (not A_is_reverse and dist > 0):
-        tentative_type = "linear"
-    else:
-        # fallout case; we skip it
-        return None
-
-    left_pos = min(A.pos, B.pos)
-    right_pos = max(A.pos, B.pos)
-
-    return JunctionCandidate(
-        read_id=A.read_id,
-        chrom=A.chrom,
-        left_pos=left_pos,
-        right_pos=right_pos,
-        strand=A.strand,
-        hits=[A, B],
-        tentative_type=tentative_type,
-    )
 
 
-
-    
 @dataclass
 class AnchorHit:
     """
     Representation of a single anchor alignment (one hit from bowtie2).
 
-    In the legacy implementation this corresponds roughly to one SAM
-    alignment record for an anchor read.
+    This is roughly analogous to one SAM alignment record for an anchor read
+    in the legacy find_circ implementation.
     """
 
     read_id: str
@@ -97,6 +34,10 @@ class AnchorHit:
     cigar: str
     mapq: int
     is_spliced: bool  # True if the CIGAR contains an 'N' (intron)
+
+    # New: keep full tag dictionary and reverse flag (for future use)
+    tags: dict = field(default_factory=dict)
+    is_reverse: bool = False
 
 
 @dataclass
@@ -143,11 +84,8 @@ class FindCircConfig:
 @dataclass
 class FindCircStats:
     """
-    Run-time statistics, roughly mirroring the counters that find_circ2
+    Run-time statistics, roughly mirroring the counters that find_circ
     writes into its log file (circ_no_bp, lin_no_bp, etc.).
-
-    For now this is just a placeholder; we'll fill individual fields while
-    porting the logic from the legacy implementation.
     """
 
     total_reads: int = 0
@@ -156,9 +94,9 @@ class FindCircStats:
     circular_junctions: int = 0
     linear_junctions: int = 0
 
-    # We keep a generic dictionary for extra counters we may want to track
-    # one-to-one with the original implementation.
+    # generic container for any extra counters we might port later
     extra: dict[str, float] = field(default_factory=dict)
+
 
 @dataclass
 class Junction:
@@ -191,116 +129,9 @@ class Junction:
     strandmatch: str
     category: str
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def run_find_circ(
-    anchors_fastq: Path,
-    genome: Path,
-    sample_name: str = "unknown",
-    prefix: str = "",
-    min_uniq_qual: int = 2,
-    anchor_size: int = 20,
-    stats_path: Optional[Path] = None,
-    reads_path: Optional[Path] = None,
-) -> Iterable[str]:
-    """
-    Core find_circ3 engine.
-
-    This function is intended to reproduce the behaviour of the original
-    `find_circ.py` script from find_circ2, but with a modern, testable API.
-
-    Parameters
-    ----------
-    anchors_fastq:
-        FASTQ file containing the anchor reads (output of an
-        unmapped2anchors-like step).
-    genome:
-        Reference genome FASTA file or folder with per-chromosome FASTAs.
-    sample_name:
-        Name of the sample/tissue. Used for naming junctions and stats.
-    prefix:
-        Optional prefix to prepend to each junction identifier.
-    min_uniq_qual:
-        Minimal uniqueness score for anchor alignments.
-    anchor_size:
-        Anchor size used when generating anchors.
-    stats_path:
-        Optional path to write numeric run statistics.
-    reads_path:
-        Optional path to write supporting reads instead of stderr.
-
-    Returns
-    -------
-    Iterable[str]
-        An iterable over BED-like lines (strings), each representing a
-        linear or circular junction. This should match the semantics of
-        the original find_circ2 output (e.g. CIRCULAR / LINEAR tags).
-    """
-    cfg = FindCircConfig(
-        anchors_fastq=anchors_fastq,
-        genome=genome,
-        sample_name=sample_name,
-        prefix=prefix,
-        min_uniq_qual=min_uniq_qual,
-        anchor_size=anchor_size,
-        stats_path=stats_path,
-        reads_path=reads_path,
-    )
-    stats = FindCircStats()
-
-    logger.info("find_circ3 starting: %s", cfg)
-
-    # NOTE:
-    # The following high-level steps are deliberately structured to map to
-    # sections of the original find_circ.py implementation. When we port
-    # the algorithm, each TODO below will become a concrete, well-scoped
-    # function.
-
-    # 1) Open genome accessor (ported from GenomeAccessor in find_circ2)
-    genome_accessor = _open_genome(cfg.genome)
-
-    # 2) Stream anchor alignments / reads
-    #    In the original code, this effectively reads a SAM stream from
-    #    bowtie2. In find_circ3 we will *eventually* either:
-    #      - read SAM/BAM from stdin, or
-    #      - operate on a pre-generated "anchors SAM" file.
-    #
-    #    For now, this is kept as a placeholder iterator.
-    anchor_stream = _iter_anchors(cfg.anchors_fastq)
-
-    # 3) Generate candidate junctions from anchor pairs
-    #    This corresponds to the "breaking anchor" logic and the core
-    #    back-splice detection code in find_circ2.
-    candidate_junctions = _detect_junction_candidates(
-        anchor_stream,
-        genome_accessor,
-        cfg,
-        stats,
-    )
-
-    # 4) Score, filter, and classify junctions (CIRCULAR vs LINEAR)
-    final_junctions = _score_and_filter_junctions(
-    candidate_junctions,
-    genome_accessor,
-    cfg,
-    stats,
-    )
-
-
-    # 5) Optionally write stats and supporting reads
-    _write_stats_if_requested(stats, cfg)
-    _write_supporting_reads_if_requested(cfg)
-
-    # 6) Convert final junctions to BED-like strings and yield them.
-    for bed_line in _junctions_to_bed(final_junctions, cfg):
-        yield bed_line
-
 
 # ---------------------------------------------------------------------------
-# Internal stubs to be filled during porting
+# Genome accessor
 # ---------------------------------------------------------------------------
 
 
@@ -344,9 +175,12 @@ class GenomeAccessor:
 
 
 def _open_genome(genome: Path) -> GenomeAccessor:
-    # TODO: in the original code, this builds a GenomeAccessor with mmap.
     return GenomeAccessor(genome)
 
+
+# ---------------------------------------------------------------------------
+# Anchor reading and candidate detection
+# ---------------------------------------------------------------------------
 
 
 def _iter_anchors(anchors_path: Path) -> Iterator[AnchorHit]:
@@ -355,33 +189,28 @@ def _iter_anchors(anchors_path: Path) -> Iterator[AnchorHit]:
 
     This opens a SAM/BAM (bowtie2 or bwa output) using pysam and yields
     one AnchorHit per alignment.
-
-    For future regression tests, this will typically read something like
-    'legacy_anchors.sam' derived from the original find_circ test_data.
     """
 
-    # Auto-detect SAM vs BAM based on suffix. This keeps things simple for now.
     suffix = anchors_path.suffix.lower()
     if suffix == ".sam":
         mode = "r"   # text SAM
     else:
-        # default to BAM/CRAM-style binary input
-        mode = "rb"
+        mode = "rb"  # BAM/CRAM-style
 
     with pysam.AlignmentFile(str(anchors_path), mode) as af:
         for aln in af.fetch(until_eof=True):
-            # skip unmapped reads; they don't contribute anchor hits
             if aln.is_unmapped:
                 continue
 
             read_id = aln.query_name
             chrom = af.get_reference_name(aln.reference_id)
-            # SAM is 0-based start → convert to 1-based
-            pos = int(aln.reference_start) + 1
+            pos = int(aln.reference_start) + 1  # 0-based → 1-based
             strand = "-" if aln.is_reverse else "+"
             cigar = aln.cigarstring or ""
             mapq = int(aln.mapping_quality)
             is_spliced = "N" in cigar
+
+            tags = dict(aln.tags)
 
             yield AnchorHit(
                 read_id=read_id,
@@ -391,9 +220,67 @@ def _iter_anchors(anchors_path: Path) -> Iterator[AnchorHit]:
                 cigar=cigar,
                 mapq=mapq,
                 is_spliced=is_spliced,
+                tags=tags,
+                is_reverse=aln.is_reverse,
             )
 
 
+
+def _candidate_from_pair(
+    A: AnchorHit,
+    B: AnchorHit,
+    cfg: FindCircConfig,
+) -> Optional[JunctionCandidate]:
+    """
+    Construct a JunctionCandidate from a single (A,B) anchor pair.
+
+    This mirrors the core geometry logic from the original find_circ.py:
+      - anchors must be on the same chromosome and strand,
+      - pairs closer than anchor_size are discarded as overlapping anchors,
+      - reversed orientation pairs → circular candidates,
+      - sequential orientation pairs → linear candidates.
+    """
+
+    # Require same chromosome
+    if A.chrom != B.chrom:
+        return None
+
+    # Require same strand
+    if A.strand != B.strand:
+        return None
+
+    # Distance in genomic coordinates
+    dist = B.pos - A.pos
+    if abs(dist) < cfg.anchor_size:
+        # overlapping anchors; do not form a candidate
+        return None
+
+    A_is_reverse = (A.strand == "-")
+
+    # Legacy logic:
+    #   if (A.is_reverse and dist > 0) or (not A.is_reverse and dist < 0):
+    #       → circular
+    #   elif (A.is_reverse and dist < 0) or (not A.is_reverse and dist > 0):
+    #       → linear
+    if (A_is_reverse and dist > 0) or (not A_is_reverse and dist < 0):
+        tentative_type: JunctionType = "circular"
+    elif (A_is_reverse and dist < 0) or (not A_is_reverse and dist > 0):
+        tentative_type = "linear"
+    else:
+        return None
+
+    left_pos = min(A.pos, B.pos)
+    right_pos = max(A.pos, B.pos)
+
+    return JunctionCandidate(
+        read_id=A.read_id,
+        chrom=A.chrom,
+        left_pos=left_pos,
+        right_pos=right_pos,
+        strand=A.strand,
+        hits=[A, B],
+        tentative_type=tentative_type,
+    )
 
 
 def _detect_junction_candidates(
@@ -405,14 +292,9 @@ def _detect_junction_candidates(
     """
     Core junction candidate discovery step.
 
-    This implementation mirrors the original find_circ behavior more closely:
-    it consumes the anchor_stream in pairs (A,B), assuming that each pair of
-    consecutive alignments belongs together (as produced by unmapped2anchors
-    + bowtie2).
-
-    For each (A,B) pair, we apply the same-chromosome, same-strand, distance
-    and orientation rules to decide whether to emit a circular or linear
-    JunctionCandidate.
+    This mirrors the original find_circ behaviour more closely: it consumes
+    the anchor_stream in pairs (A,B), assuming that each pair of consecutive
+    alignments belongs together (as produced by unmapped2anchors + bowtie2).
     """
 
     buffer: AnchorHit | None = None
@@ -438,7 +320,11 @@ def _detect_junction_candidates(
             yield cand
 
     # If there's an odd number of alignments, we silently drop the last one.
-    # This matches the behavior of grouper(2, sam) in the original code.
+
+
+# ---------------------------------------------------------------------------
+# Scoring & filtering via HitAccumulator
+# ---------------------------------------------------------------------------
 
 
 def _score_and_filter_junctions(
@@ -450,19 +336,10 @@ def _score_and_filter_junctions(
     """
     Scoring and filtering of candidate junctions.
 
-    This is a minimal, first-pass implementation inspired by the legacy
-    Hit.add / Hit.scores logic from find_circ:
-
-      - aggregate per-candidate read support,
-      - compute simple uniqueness / bridge metrics from MAPQ,
-      - derive a 4bp splice signal from the genome,
-      - assign a category ("CIRCULAR"/"LINEAR") based on tentative_type.
-
-    It does *not* yet replicate full breakpoint refinement or all of the
-    original filters; those can be added incrementally.
+    Delegates most of the aggregation to HitAccumulator, which is
+    structurally aligned with the original Hit class from find_circ.py.
     """
 
-    # Simple helper to map tentative_type → final BED category
     type_to_category = {
         "circular": "CIRCULAR",
         "linear": "LINEAR",
@@ -470,99 +347,33 @@ def _score_and_filter_junctions(
     }
 
     for cand in candidate_junctions:
-        # For now, we only emit circular/linear candidates
         if cand.tentative_type not in ("circular", "linear"):
             continue
 
-        hits = cand.hits
-        if not hits:
+        category = type_to_category.get(cand.tentative_type, "OTHER")
+        if category == "OTHER":
             continue
 
-        # Core support metrics (Hit-like)
-        n_reads = len(hits)
-        # count "unique" hits based on mapq threshold
-        uniq_flags = [h.mapq >= cfg.min_uniq_qual for h in hits]
-        n_uniq = sum(uniq_flags)
-        # uniq_bridges: both anchors from same read align uniquely
-        uniq_bridges = 1 if all(uniq_flags) and len(hits) >= 2 else 0
-
-        # Best qualities for A/B (take first two hits if available)
-        best_qual_left = hits[0].mapq
-        best_qual_right = hits[1].mapq if len(hits) > 1 else hits[0].mapq
-
-        # Tissues / counts: we don't track tissues yet; use a simple placeholder
-        tissues = "sample"
-        tiss_counts = str(n_reads)
-
-        # Edits / overlaps / n_hits: not implemented yet; placeholders
-        edits = 0
-        anchor_overlap = 0
-        breakpoints = 0
-
-        # Splice signal and strandmatch using genome
-        signal = "NNNN"
-        strandmatch = "NA"
-
-        try:
-            # Very simple 2+2 bp signal: 2bp around left and right positions.
-            # In a more faithful port, we'd use the refined breakpoints;
-            # here we approximate with the candidate's left/right coords.
-            left2 = genome_accessor.get_seq(cand.chrom, cand.left_pos, cand.left_pos + 1)
-            right2 = genome_accessor.get_seq(cand.chrom, cand.right_pos - 1, cand.right_pos)
-            signal = (left2 + right2).upper()
-
-            # Canonical splice motifs (GT-AG, GC-AG, AT-AC); this is a simplification.
-            canonical = {"GTAG", "GCAG", "ATAC"}
-            strandmatch = "MATCH" if signal in canonical else "MISMATCH"
-        except Exception:
-            # If genome access fails, keep defaults
-            signal = "NNNN"
-            strandmatch = "NA"
-
-        category = type_to_category.get(cand.tentative_type, "OTHER")
-
-        # Update high-level stats
-        if category == "CIRCULAR":
-            stats.circular_junctions += 1
-        elif category == "LINEAR":
-            stats.linear_junctions += 1
-
-        # Construct a name similar to find_circ IDs
-        name = f"{cfg.prefix}{cand.chrom}:{cand.left_pos}|{cand.right_pos}"
-
-        j = Junction(
-            chrom=cand.chrom,
-            start=cand.left_pos,
-            end=cand.right_pos,
-            name=name,
-            n_reads=n_reads,
-            strand=cand.strand,
-            n_uniq=n_uniq,
-            uniq_bridges=uniq_bridges,
-            best_qual_left=best_qual_left,
-            best_qual_right=best_qual_right,
-            tissues=tissues,
-            tiss_counts=tiss_counts,
-            edits=edits,
-            anchor_overlap=anchor_overlap,
-            breakpoints=breakpoints,
-            signal=signal,
-            strandmatch=strandmatch,
-            category=category,
-        )
+        acc = HitAccumulator()
+        acc.add_candidate(cand, cfg, genome_accessor)
+        j = acc.finalize(cfg, stats, category=category, prefix=cfg.prefix)
         yield j
+
+
+# ---------------------------------------------------------------------------
+# Stats / supporting reads / BED output
+# ---------------------------------------------------------------------------
 
 
 def _write_stats_if_requested(stats: FindCircStats, cfg: FindCircConfig) -> None:
     """
     Write numeric run statistics if cfg.stats_path is set.
 
-    The exact contents will be modelled after the original find_circ2 log
-    (circ_no_bp, lin_no_bp, etc.). For now, this is a placeholder.
+    The exact contents will be modelled after the original find_circ log.
+    For now this is a placeholder.
     """
     if cfg.stats_path is None:
         return
-    # TODO: implement once stats fields are properly populated.
     logger.debug("Stats writing is not implemented yet; skipping.")
 
 
@@ -575,7 +386,6 @@ def _write_supporting_reads_if_requested(cfg: FindCircConfig) -> None:
     """
     if cfg.reads_path is None:
         return
-    # TODO: implement once we have the representation of supporting reads.
     logger.debug("Supporting reads writing is not implemented yet; skipping.")
 
 
@@ -586,8 +396,8 @@ def _junctions_to_bed(
     """
     Convert final junction objects to BED-like lines.
 
-    We mirror the column structure and semantics of the original
-    find_circ splice_sites.bed output (18 columns).
+    We mirror the column structure of the original find_circ
+    splice_sites.bed output (18 columns).
     """
 
     for j in final_junctions:
@@ -612,3 +422,60 @@ def _junctions_to_bed(
             j.category,
         ]
         yield "\t".join(fields)
+
+
+# ---------------------------------------------------------------------------
+# Public engine API
+# ---------------------------------------------------------------------------
+
+
+def run_find_circ(
+    anchors_fastq: Path,
+    genome: Path,
+    sample_name: str = "unknown",
+    prefix: str = "",
+    min_uniq_qual: int = 2,
+    anchor_size: int = 20,
+    stats_path: Optional[Path] = None,
+    reads_path: Optional[Path] = None,
+) -> Iterable[str]:
+    """
+    Core find_circ3 engine.
+
+    Designed to reproduce the behaviour of the original find_circ script,
+    but with a modern, testable API.
+    """
+    cfg = FindCircConfig(
+        anchors_fastq=anchors_fastq,
+        genome=genome,
+        sample_name=sample_name,
+        prefix=prefix,
+        min_uniq_qual=min_uniq_qual,
+        anchor_size=anchor_size,
+        stats_path=stats_path,
+        reads_path=reads_path,
+    )
+    stats = FindCircStats()
+
+    logger.info("find_circ3 starting: %s", cfg)
+
+    genome_accessor = _open_genome(cfg.genome)
+    anchor_stream = _iter_anchors(cfg.anchors_fastq)
+    candidate_junctions = _detect_junction_candidates(
+        anchor_stream,
+        genome_accessor,
+        cfg,
+        stats,
+    )
+    final_junctions = _score_and_filter_junctions(
+        candidate_junctions,
+        genome_accessor,
+        cfg,
+        stats,
+    )
+
+    _write_stats_if_requested(stats, cfg)
+    _write_supporting_reads_if_requested(cfg)
+
+    for bed_line in _junctions_to_bed(final_junctions, cfg):
+        yield bed_line
