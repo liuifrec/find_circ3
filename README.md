@@ -16,5 +16,16 @@ Core detection engine is **not** implemented yet.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  # On Windows: .venv\Scriptsctivate
 pip install -e .
+```
+
+## Command-line interface
+
+```bash
+find-circ3 --help
+find-circ3-anchors --help
+```
+
+These currently expose a basic CLI skeleton and stubbed functionality;
+the core algorithm will be added in later phases.
