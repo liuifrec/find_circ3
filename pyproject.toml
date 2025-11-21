@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "find-circ3"
+version = "0.1.0"
+description = "Python 3 reimplementation of the classic find_circ circRNA detector"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+
+authors = [
+  { name = "Yu-Chen (James) Liu", email = "your.email@example.com" }
+]
+
+dependencies = [
+  "numpy",
+  "pysam",
+  "click>=8.0",
+]
+
+[project.scripts]
+find-circ3 = "find_circ3.cli:main"
+find-circ3-anchors = "find_circ3.anchors:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

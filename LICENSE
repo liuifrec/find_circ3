@@ -1,3 +1,13 @@
+This project includes a reimplementation of the algorithm from:
+
+  find_circ (Memczak et al., Nature 2013; Jens et al.)
+  Original algorithm and Python 2 reference implementation:
+    © 2013–2017 Marvin Jens, Rajewsky Lab
+    https://github.com/rajewsky-lab/find_circ
+
+Python 3 port, modernization, packaging, and integration with circyto:
+  © 2025 Yu-Chen (James) Liu
+
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
