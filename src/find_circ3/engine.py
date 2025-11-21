@@ -80,6 +80,10 @@ class FindCircConfig:
     stats_path: Optional[Path] = None
     reads_path: Optional[Path] = None
 
+    # Breakpoint-related options (mirroring legacy find_circ)
+    margin: Optional[int] = None          # if None, defaults to anchor_size // 4
+    max_mismatches: int = 2               # like options.maxdist
+    strandpref: bool = False              # prefer strand-matched BPs when True
 
 @dataclass
 class FindCircStats:
@@ -438,6 +442,9 @@ def run_find_circ(
     anchor_size: int = 20,
     stats_path: Optional[Path] = None,
     reads_path: Optional[Path] = None,
+    margin: Optional[int] = None,
+    max_mismatches: int = 2,
+    strandpref: bool = False,
 ) -> Iterable[str]:
     """
     Core find_circ3 engine.
@@ -454,6 +461,9 @@ def run_find_circ(
         anchor_size=anchor_size,
         stats_path=stats_path,
         reads_path=reads_path,
+        margin=margin,
+        max_mismatches=max_mismatches,
+        strandpref=strandpref,
     )
     stats = FindCircStats()
 

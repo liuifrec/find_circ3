@@ -119,5 +119,13 @@ def test_cli_cdr1as_emits_circular_junctions():
 
     # We only assert that at least one junction is marked CIRCULAR for this
     # CDR1as anchor test. Later, we can tighten this to check coordinates.
-    circ_lines = [ln for ln in out_lines if ln.endswith("CIRCULAR")]
+    circ_lines = []
+    for ln in out_lines:
+        fields = ln.split("\t")
+        if not fields:
+            continue
+        categories = fields[-1].split(",")
+        if "CIRCULAR" in categories:
+            circ_lines.append(ln)
+
     assert circ_lines, "No CIRCULAR junctions emitted for CDR1as test"

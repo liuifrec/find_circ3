@@ -259,6 +259,48 @@ class HitAccumulator:
 
         name = f"{prefix}{self.chrom}:{self.left_pos}|{self.right_pos}"
 
+        # Legacy-style category labels
+        categories: list[str] = []
+
+        # CANONICAL only for GTAG (legacy find_circ behaviour)
+        if self.signal == "GTAG":
+            categories.append("CANONICAL")
+
+        # STRANDMATCH for canonical strandmatch
+        if self.strandmatch == "MATCH":
+            categories.append("STRANDMATCH")
+
+        # ANCHOR_UNIQUE if both anchors can align uniquely and at least one
+        # uniq bridge has been observed.
+        if best_qual_left > 0 and best_qual_right > 0 and self.uniq_bridges > 0:
+            categories.append("ANCHOR_UNIQUE")
+
+        # NO_UNIQ_BRIDGES when we never saw a unique bridge
+        if self.uniq_bridges == 0:
+            categories.append("NO_UNIQ_BRIDGES")
+
+        # UNAMBIGUOUS_BP if there is exactly one best breakpoint
+        if min_n_hits == 1:
+            categories.append("UNAMBIGUOUS_BP")
+
+        # Extension quality based on edits and anchor overlap
+        if min_overlap == 0 and min_edits == 0:
+            categories.append("PERFECT_EXT")
+        elif min_overlap <= 1 and min_edits <= 1:
+            categories.append("GOOD_EXT")
+        elif min_overlap <= 2 and min_edits <= 2:
+            categories.append("OK_EXT")
+
+        # If no other label assigned, call it DUBIOUS (legacy default)
+        if not categories:
+            categories.append("DUBIOUS")
+
+        # Final CIRCULAR/LINEAR tag
+        categories.append(category)
+
+        # Sort for deterministic output (as in legacy: sorted(categories))
+        category_str = ",".join(sorted(categories))
+
         return Junction(
             chrom=self.chrom,
             start=self.left_pos,
@@ -277,5 +319,5 @@ class HitAccumulator:
             breakpoints=min_n_hits,
             signal=self.signal,
             strandmatch=self.strandmatch,
-            category=category,
+            category=category_str,
         )

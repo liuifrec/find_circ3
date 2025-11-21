@@ -89,3 +89,49 @@ def call_cmd(anchors_fastq, genome, name, prefix, min_uniq_qual, anchor, stats, 
     except NotImplementedError as e:
         click.echo(f"# find-circ3 engine not implemented yet: {e}", err=True)
         sys.exit(1)
+@click.option(
+    "--margin",
+    type=int,
+    help="Margin (bp) for breakpoint search; defaults to anchor_size // 4.",
+)
+@click.option(
+    "--max-mismatches",
+    "max_mismatches",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Maximum mismatches allowed in breakpoint search.",
+)
+@click.option(
+    "--strandpref/--no-strandpref",
+    default=False,
+    show_default=True,
+    help="Prefer strand-matched breakpoints when breaking ties.",
+)
+def call_cmd(
+    anchors_fastq,
+    genome,
+    name,
+    prefix,
+    min_uniq_qual,
+    anchor,
+    stats,
+    reads,
+    margin,
+    max_mismatches,
+    strandpref,
+):
+    ...
+    junctions = run_find_circ(
+        anchors_fastq=anchors_fastq,
+        genome=genome,
+        sample_name=name,
+        prefix=prefix,
+        min_uniq_qual=min_uniq_qual,
+        anchor_size=anchor,
+        stats_path=Path(stats) if stats else None,
+        reads_path=Path(reads) if reads else None,
+        margin=margin,
+        max_mismatches=max_mismatches,
+        strandpref=strandpref,
+    )

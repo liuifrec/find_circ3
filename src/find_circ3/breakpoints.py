@@ -106,7 +106,8 @@ def find_breakpoints(
     """
     asize = cfg.anchor_size
     # Defaults analogous to legacy options.margin and options.maxdist
-    margin = getattr(cfg, "margin", max(1, asize // 4))
+    margin = cfg.margin if cfg.margin is not None else max(1, asize // 4)
+
     maxdist = getattr(cfg, "max_mismatches", 2)
     strandpref = getattr(cfg, "strandpref", False)
 
