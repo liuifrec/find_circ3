@@ -115,10 +115,11 @@ genome_index
 
 ### Step 1 — Map paired-end reads & extract unmapped
 
-Unmapped reads become anchor candidates.
+Unmapped reads become anchor candidates.  
+**Important:** do *not* use `--no-unal` here, we need the unmapped reads in the BAM.
 
 ```bash
-bowtie2 -x genome_index   -1 sample_R1.fastq.gz   -2 sample_R2.fastq.gz   --very-sensitive   --score-min C,-15,0   --no-unal   2> sample_firstpass.log   | samtools view -bS - > sample_aln.bam
+bowtie2 -x genome_index   -1 sample_R1.fastq.gz   -2 sample_R2.fastq.gz   --very-sensitive   --score-min C,-15,0   2> sample_firstpass.log   | samtools view -bS - > sample_aln.bam
 
 samtools view -b -f 4 sample_aln.bam > sample_unmapped.bam
 ```
