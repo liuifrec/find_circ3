@@ -35,7 +35,7 @@ find_circ3/
   engine.py          # main junction detection logic
   breakpoints.py     # full breakpoint search
   hit_accumulator.py # scoring + category assignment
-  anchors.py         # future unmapped2anchors3 interface
+  anchors.py         # Python 3 unmapped2anchors3 implementation
   cli.py             # 'find-circ3' command
   io.py              # BAM/SAM helpers (expandable)
 ```
