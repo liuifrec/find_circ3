@@ -23,7 +23,7 @@ It preserves the algorithmic behavior of **find_circ v1.2** while providing:
 - Edit distance + anchor overlap scoring  
 - Canonical / noncanonical splice signal recognition  
   (GT/GC/AT–AG)  
-- Strand-aware tie-breaking  
+- Strand-aware tie-breaking (optional)  
 - AS/XS-based unique-bridge scoring  
 - Full legacy category reconstruction:
 
@@ -39,10 +39,10 @@ CIRCULAR or LINEAR
 
 ## ✔ Modular Architecture
 
-```
+```text
 src/find_circ3/
-  cli.py             # 'find-circ3' CLI
-  anchors.py         # Python 3 unmapped2anchors3
+  cli.py             # 'find-circ3' CLI (group: call, anchors)
+  anchors.py         # Python 3 unmapped2anchors3 (find-circ3-anchors / find-circ3 anchors)
   engine.py          # main junction detection logic
   breakpoints.py     # breakpoint detection + scoring
   hit_accumulator.py # scoring + category assembly
@@ -61,6 +61,7 @@ Includes reproducible tests for:
 - Breakpoint detection (edit distance, overlap)  
 - Anchors CLI tests (BAM + FASTQ modes)  
 - Legacy dataset consistency  
+- Optional integration test: **BAM → anchors → bowtie2 → call**
 
 All tests pass in the latest repo state.
 
@@ -95,18 +96,18 @@ This reproduces the original find_circ pipeline entirely in Python 3.
 ### Step 0 — Inputs
 
 **Paired-end FASTQ**
-```
+```text
 sample_R1.fastq.gz
 sample_R2.fastq.gz
 ```
 
 **Reference genome**
-```
+```text
 genome.fa
 ```
 
 **Bowtie2 index**
-```
+```text
 genome_index
 ```
 
@@ -126,7 +127,13 @@ samtools view -b -f 4 sample_aln.bam > sample_unmapped.bam
 
 ### Step 2 — Generate anchors (Python 3 unmapped2anchors3)
 
+You can now use **either** the dedicated console script **or** the grouped CLI alias:
+
 ```bash
+# Recommended: grouped CLI
+find-circ3 anchors sample_unmapped.bam   --anchor 20   --min-qual 5   > sample_anchors.fastq
+
+# Exact equivalent legacy-style entry point
 find-circ3-anchors sample_unmapped.bam   --anchor 20   --min-qual 5   > sample_anchors.fastq
 ```
 
@@ -177,6 +184,8 @@ Key options:
 | `--max-mismatches` | Allowed mismatches                     |
 | `--margin`         | Flank margin (default = anchor/4)      |
 | `--strandpref`     | Tie-breaking by strand                 |
+| `--stats`          | Write stats log                        |
+| `--reads`          | Write supporting read sequences        |
 
 ---
 
@@ -219,6 +228,11 @@ Output is deterministic and unit-tested.
 - CDR1as → produces ≥1 CIRCULAR call  
 - breakpoints tests  
 - anchors tests  
+- optional **integration test**:
+  - builds a tiny genome index,
+  - creates a small unmapped BAM,
+  - runs `find-circ3 anchors` → bowtie2 → `find-circ3 call`,
+  - asserts that at least one junction line is produced.
 
 ---
 
@@ -245,6 +259,7 @@ Python 3 modernization and reimplementation:
 - ✔ AS/XS scoring + category reconstruction  
 - ✔ Python 3 unmapped2anchors3  
 - ✔ Consistent CLI (`--margin`, `--max-mismatches`, `--strandpref`)  
+- ✔ `find-circ3 anchors` CLI alias  
 - 🔄 circyto integration  
 - 🔄 Multi-threading & performance optimization  
 - 🔄 PyPI distribution  
