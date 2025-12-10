@@ -2,24 +2,24 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
-
 import sys
+
 import click
 
 from .engine import run_find_circ
-from .anchors import main as anchors_cmd  # click.command in anchors.py
+from .anchors import main as anchors_main  # the click.command() from anchors.py
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
-    """find_circ3 command-line interface.
+    """
+    find_circ3 command-line interface.
 
     Subcommands:
-      call    : run the core find_circ3 engine on an anchors SAM/BAM
-      anchors : generate A/B anchors from unmapped reads
+      anchors : generate A/B anchors from unmapped BAM
+      call    : call junctions from anchors SAM
     """
-    # Click uses this as the root group; no body needed.
+    # click uses this as the root group; no body needed.
     pass
 
 
@@ -33,104 +33,107 @@ def main() -> None:
     "-g",
     required=True,
     type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
-    help="Reference genome FASTA.",
+    help="Reference genome FASTA used to align the anchors.",
 )
 @click.option(
     "--name",
     "-n",
     "sample_name",
-    default="unknown",
+    default="sample",
     show_default=True,
-    help="Sample name used in the 4th BED column.",
+    help="Sample name used in the 11th BED column.",
 )
 @click.option(
     "--prefix",
     "-p",
     default="",
     show_default=True,
-    help="Prefix for junction names.",
+    help="Prefix for junction names (4th BED column).",
 )
 @click.option(
-    "--anchor",
     "-a",
-    "anchor_size",
+    "--anchor",
+    type=int,
     default=20,
     show_default=True,
-    help="Anchor size (must match unmapped2anchors3).",
+    help="Anchor size used upstream in unmapped2anchors3.",
 )
 @click.option(
-    "--min-uniq-qual",
-    default=2,
-    show_default=True,
-    help="Minimum AS–XS margin to treat an anchor as unique.",
-)
-@click.option(
-    "--margin",
+    "--min-mapq",
     type=int,
-    default=None,
-    help="Breakpoint search flank margin (default = anchor/4).",
+    default=0,
+    show_default=True,
+    help="Minimum MAPQ for anchor alignments to be considered.",
 )
 @click.option(
-    "--max-mismatches",
+    "--min-as-xs",
+    type=int,
     default=2,
     show_default=True,
-    help="Maximum allowed mismatches in breakpoint search.",
+    help="Minimum AS–XS margin to treat an anchor as uniquely placed.",
 )
 @click.option(
-    "--strandpref/--no-strandpref",
+    "--max-intron",
+    type=int,
+    default=200000,
+    show_default=True,
+    help="Maximum intron length allowed for junctions.",
+)
+@click.option(
+    "--min-support",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Minimum number of supporting reads per junction (set to 1 for tests).",
+)
+@click.option(
+    "--allow-non-canonical/--no-allow-non-canonical",
     default=False,
     show_default=True,
-    help="Prefer strand-matched breakpoints when tie-breaking.",
-)
-@click.option(
-    "--stats",
-    "stats_path",
-    type=click.Path(dir_okay=False, path_type=Path),
-    default=None,
-    help="Optional path to write run statistics.",
-)
-@click.option(
-    "--reads",
-    "reads_path",
-    type=click.Path(dir_okay=False, path_type=Path),
-    default=None,
-    help="Optional path to write supporting read sequences.",
+    help="Allow non-GT/AG splice motifs.",
 )
 def call_cmd(
     anchors_sam: Path,
     genome: Path,
     sample_name: str,
     prefix: str,
-    anchor_size: int,
-    min_uniq_qual: int,
-    margin: Optional[int],
-    max_mismatches: int,
-    strandpref: bool,
-    stats_path: Optional[Path],
-    reads_path: Optional[Path],
+    anchor: int,
+    min_mapq: int,
+    min_as_xs: int,
+    max_intron: int,
+    min_support: int,
+    allow_non_canonical: bool,
 ) -> None:
-    """Call circular / linear junctions from an anchors SAM/BAM file."""
+    """
+    Call circular / linear junctions from an anchors SAM/BAM file.
+
+    This is a thin wrapper around engine.run_find_circ, which yields
+    BED-format junction lines. We just stream them to stdout.
+    """
     for line in run_find_circ(
         anchors_fastq=anchors_sam,
         genome=genome,
         sample_name=sample_name,
         prefix=prefix,
-        min_uniq_qual=min_uniq_qual,
-        anchor_size=anchor_size,
-        stats_path=stats_path,
-        reads_path=reads_path,
-        margin=margin,
-        max_mismatches=max_mismatches,
-        strandpref=strandpref,
+        anchor=anchor,
+        min_mapq=min_mapq,
+        min_as_xs=min_as_xs,
+        max_intron=max_intron,
+        min_support=min_support,
+        allow_non_canonical=allow_non_canonical,
+        sample=sample_name,
+        stats_path=None,
+        reads_path=None,
     ):
-        click.echo(line)
+        # run_find_circ yields '\n'-terminated strings; click will add its own
+        # newline unless we strip it, so we rstrip() first.
+        click.echo(line.rstrip("\n"))
 
 
-# Add the anchors subcommand as an alias to the anchors.py CLI
-# anchors_cmd is itself a @click.command() named "main" in anchors.py.
-main.add_command(anchors_cmd, name="anchors")
+# Expose the anchors subcommand (from anchors.py) under the group.
+# anchors_main is already a @click.command() named "main" in anchors.py.
+main.add_command(anchors_main, name="anchors")
 
 
 if __name__ == "__main__":
-    # This still works when running `python -m find_circ3.cli`
     sys.exit(main())
