@@ -1,0 +1,1 @@
+defaultdict(<type 'int'>, {'other_strand': 50399, 'spliced_reads': 1249, 'overlapping_anchors': 22, 'circ_no_bp': 24769, 'splice_no_bp': 32694, 'unmapped': 1969555, 'total': 2078784, 'circ_reads': 96})

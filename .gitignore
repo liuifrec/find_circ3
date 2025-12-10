@@ -200,6 +200,13 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Large ERR2139486 legacy datasets - keep local only
+tests/test_data/ERR2139486_chr21/ERR2139486_unmapped_legacy.bam
+tests/test_data/ERR2139486_chr21/ERR2139486_vs_chr21_legacy.bam
+tests/test_data/ERR2139486_chr21/ERR2139486.anchors.sam
+tests/test_data/ERR2139486_chr21/ERR2139486_aln_legacy.bam
+tests/test_data/ERR2139486_chr21/ERR2139486.anchors.fastq
+tests/test_data/ERR2139486_chr21/ERR2139486_anchors_legacy.fastq.gz
 
 # Marimo
 marimo/_static/
