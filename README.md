@@ -1,319 +1,274 @@
-
 # find_circ3
 
-A modern, Python 3 reimplementation of **find_circ.py** with:
+A modern, Python 3 re‑implementation of Marvin Jens’ **find_circ.py v1.2** for circular RNA (circRNA) detection.
 
-- a small, testable codebase,
-- a dual-engine design (strict legacy mode + modern engine),
-- and regression tests that lock behavior to the original `find_circ.py` and CDR1as examples.
+`find_circ3` keeps the original logic and output format for legacy anchor files, while providing a cleaner CLI and tests. It is designed to:
 
-The goal is **practical, stable circRNA calling** that behaves like the original tool on legacy anchor files, while still being hackable and maintainable.
+- Reproduce the original `find_circ.py` behavior on legacy unmapped‑anchor workflows.
+- Work as a library/CLI component for downstream tools (e.g. `circyto`).
+- Be fully testable and maintainable (Python 3, `pytest`, `pysam`).
+
+> **Status (Dec 2025)**  
+> - Legacy engine ported almost verbatim from `find_circ.py`.  
+> - Regression tests against the original tiny test and CDR1as locus.  
+> - Regression on a chr21 subset of ERR2139486: **53/54** original junctions recovered (the remaining one is a very long circular candidate spanning most of chr21).
+
 
 ---
 
 ## 1. Installation
 
+Clone the repository and install in editable mode (recommended during development):
+
 ```bash
 git clone https://github.com/liuifrec/find_circ3.git
 cd find_circ3
 
-# Create a fresh virtualenv (recommended)
-python3 -m venv .venv
+# create & activate a virtualenv if you like
+python -m venv .venv
 source .venv/bin/activate
 
-# Install in editable mode with all dependencies
-pip install -U pip
 pip install -e .
 ```
 
-Requirements (roughly):
-
-- Python ≥ 3.10
-- `pysam`, `numpy`, `click`, `pytest`
-- A short-read aligner (e.g. **bowtie2**)
-- `samtools` for typical BAM/SAM processing
-
-Run tests to confirm everything is wired correctly:
+This installs the CLI entry point:
 
 ```bash
-pytest -q
+find-circ3 --help
 ```
 
-You should see:
+You should see the two subcommands:
 
-- 6 tests **passed**
-- 1 test **xpassed** (integration test that is intentionally skipped/expected)
+- `find-circ3 anchors` – generate A/B anchors from **unmapped** reads.
+- `find-circ3 call` – call circular and linear junctions from an **anchors SAM/BAM** aligned to the genome.
+
 
 ---
 
-## 2. Command line usage
+## 2. Concepts and input files
 
-The CLI exposes two subcommands:
+The pipeline follows the original find_circ workflow:
 
-- `find-circ3 anchors` – generate A/B anchors from unmapped reads  
-- `find-circ3 call` – call circular and linear junctions from anchor alignments
+1. Map raw paired‑end reads to the genome.
+2. Collect **unmapped reads** from the primary alignment.
+3. Convert unmapped reads to **anchor reads** (left/right end “A/B” anchors).
+4. Map anchors back to the genome.
+5. From anchor‑anchor pairs, infer:
+   - **Circular junctions** (back‑splice, reversed orientation).
+   - **Linear junctions** (canonical splicing).
 
-### 2.1. `find-circ3 call`
+Key files:
 
-This is the main entry point when you already have **anchor alignments** (SAM/BAM).
+- **Raw reads**: `sample_R1.fastq.gz`, `sample_R2.fastq.gz`
+- **Genome FASTA**: `genome.fa` (and a bowtie2 index)
+- **Primary alignment**: `sample_vs_genome.bam`
+- **Unmapped reads BAM**: `sample_unmapped.bam`
+- **Anchors FASTQ**: `sample_anchors.fastq.gz`
+- **Anchors vs genome SAM/BAM**: `sample_anchors_vs_genome.sam`
+- **Final junctions BED**: `sample_splice_sites.bed`
+
+
+---
+
+## 3. Full pipeline: FASTQ → circRNA junctions
+
+Below is a minimal, end‑to‑end example using bowtie2 + samtools + find_circ3.  
+Adjust paths, thread counts, and options as appropriate for your data.
+
+### 3.1 Build bowtie2 index (once per reference)
 
 ```bash
-find-circ3 call \
-  anchors.sam \
-  --genome genome.fa \
-  --name SAMPLE_NAME \
-  --prefix SAMPLE_ \
-  --anchor 20 \
-  --max-intron 200000 \
-  --min-support 1 \
-  > splice_sites.bed
+bowtie2-build genome.fa genome_bt2
+```
+
+### 3.2 Map raw reads to the genome (primary mapping)
+
+> ⚠️ **Important:** do **not** use `--no-unal` here – we need unmapped reads.
+
+```bash
+bowtie2 -p 8 --score-min C,-15,0 --mm --reorder   -x genome_bt2   -1 sample_R1.fastq.gz   -2 sample_R2.fastq.gz   -S sample_vs_genome.sam
+
+# Convert to BAM and clean up
+samtools view -bS sample_vs_genome.sam | samtools sort -o sample_vs_genome.bam
+samtools index sample_vs_genome.bam
+rm sample_vs_genome.sam
+```
+
+### 3.3 Extract unmapped reads
+
+We keep only reads that **failed to align** in the primary mapping:
+
+```bash
+samtools view -b -f 4 sample_vs_genome.bam > sample_unmapped.bam
+```
+
+- `-f 4` → select unmapped reads  
+- You can add more flags (e.g. to require both mates unmapped) if desired, but this simple form works well for the classic pipeline.
+
+### 3.4 Generate anchor reads
+
+Now convert unmapped reads into left/right anchors. The `anchors` command is a thin wrapper around the classic `unmapped2anchors` logic.
+
+```bash
+find-circ3 anchors sample_unmapped.bam   --anchor 20   --out sample_anchors.fastq.gz
+```
+
+Notes:
+
+- `--anchor` must match the anchor size you will later pass to `find-circ3 call` (default 20 nt).
+- Output is a FASTQ file where each original read yields a pair of anchors with `*_A` / `*_B` style names.
+- Use `find-circ3 anchors --help` for additional options (e.g. compression, filtering).
+
+### 3.5 Map anchors back to the genome
+
+We now align the **anchors** to the genome. Here `--no-unal` is safe: unmapped anchors are simply ignored later.
+
+```bash
+bowtie2 -p 8 --score-min C,-15,0 --mm --reorder --no-unal   -x genome_bt2   -U sample_anchors.fastq.gz   -S sample_anchors_vs_genome.sam
+```
+
+You can optionally compress to BAM:
+
+```bash
+samtools view -bS sample_anchors_vs_genome.sam > sample_anchors_vs_genome.bam
+```
+
+Either SAM or BAM can be passed to `find-circ3 call`.
+
+### 3.6 Call circular and linear junctions
+
+This step reproduces the original `find_circ.py` behavior (for legacy anchor names) using a faithful Python 3 port under the hood.
+
+```bash
+find-circ3 call sample_anchors_vs_genome.sam   --genome genome.fa   --name sample   --prefix sample_   --anchor 20   --min-as-xs 2   --max-intron 200000   --min-support 1   > sample_splice_sites.bed
 ```
 
 Key options:
 
-- `anchors.sam`  
-  SAM (or BAM) file produced by aligning A/B anchors against the genome.
+- `--genome` / `-g` – reference FASTA (same as used for bowtie2 alignment).
+- `--name` / `-n` – sample name used in the “tissues” column.
+- `--prefix` / `-p` – prefix for junction IDs (`sample_circ_000001`, etc.).
+- `--anchor` – **must match** anchor size used in `find-circ3 anchors`.
+- `--min-as-xs` – minimal **AS–XS** margin to treat an anchor as uniquely placed (legacy `min_uniq_qual`, default 2).
+- `--max-intron` – maximum genomic span allowed for a junction (default 200 kb).
+- `--min-support` – minimal number of supporting reads per junction (default 1).
+- `--allow-non-canonical` – if set, also considers non‑GT/AG motifs (not recommended for default runs).
 
-- `--genome` / `-g`  
-  Reference genome FASTA used for anchor alignment.
+Output (`sample_splice_sites.bed`) is a BED‑like table:
 
-- `--name` / `-n`  
-  Sample name written into the BED “tissues” column.
-
-- `--prefix` / `-p`  
-  Prefix for junction names, e.g. `SAMPLE_circ_000001`.
-
-- `--anchor` / `-a`  
-  Anchor size used upstream in the anchor-generation step  
-  (must match the anchor length in `unmapped2anchors3` / `find-circ3 anchors`).
-
-- `--max-intron`  
-  Maximum allowed genomic span (`end - start`) in bp.  
-  Default: **200,000**.  
-  This is a *safety* filter to remove implausibly huge junctions on real data.
-
-- `--min-support`  
-  Minimum number of supporting reads per junction (default = 1).
-
-- `--allow-non-canonical`  
-  If set, also allow non-GT/AG splice motifs.  
-  By default, only canonical **GT/AG** junctions are reported.
-
-Run `find-circ3 call --help` to see the full set of options.
-
----
-
-### 2.2. `find-circ3 anchors` (A/B anchor generation)
-
-The `anchors` subcommand is the modern replacement for the original `unmapped2anchors.py` / `unmapped2anchors3` scripts:
-
-```bash
-find-circ3 anchors \
-  unmapped.bam \
-  --anchor 20 \
-  > anchors.fastq
+```text
+chrom  start  end   name          n_reads strand n_uniq uniq_bridges best_qual_left best_qual_right tissues ...
+chr21  33523435 33527305 sample_circ_000001 31 + 13 28 40 40 sample 31 ... CIRCULAR,PERFECT_EXT,ANCHOR_UNIQUE, ...
 ```
 
-Typical pattern:
+The **last column** lists comma‑separated categories, such as:
 
-1. Start from **unmapped reads** from your original genome alignment.
-2. Convert unmapped reads into A/B anchors (`anchors.fastq`).
-3. Align these anchors to the genome with a sensitive local aligner (e.g. bowtie2).
-4. Feed the resulting `anchors.sam` into `find-circ3 call`.
+- `CIRCULAR` or `LINEAR`
+- `CANONICAL` (GT/AG)
+- `ANCHOR_UNIQUE`
+- `PERFECT_EXT` / `GOOD_EXT` / `OK_EXT`
+- `UNAMBIGUOUS_BP`
 
-For the exact options and recommended parameters, always check:
+You can filter high‑confidence circRNAs by requiring, for example:
+
+- `CIRCULAR`
+- `ANCHOR_UNIQUE`
+- `CANONICAL`
+- `PERFECT_EXT` or `GOOD_EXT`
+
+
+---
+
+## 4. Tiny test and CDR1as regression checks
+
+The repository ships small regression datasets that are also used by the test suite.
+
+### 4.1 Tiny test
 
 ```bash
-find-circ3 anchors --help
+find-circ3 call tests/test_against_legacy/data/tiny.sam   --genome tests/test_against_legacy/data/tiny_genome.fa   --name test   --prefix test_   --anchor 5   > tiny_out.bed
+
+diff <(grep -v '^#' tiny_out.bed)      <(grep -v '^#' tests/test_against_legacy/data/tiny_expected.bed)
 ```
 
-> **Note:**  
-> Earlier README versions accidentally suggested using `--no-unal` in anchor-alignment commands, which can silently strip out useful anchors. The current docs purposely avoid `--no-unal` here; if you change alignment settings, be sure you understand how unmapped/multi-mapped anchors are handled.
+This should produce identical non‑comment lines.
 
----
+### 4.2 CDR1as locus
 
-## 3. Legacy compatibility & engine design
+```bash
+find-circ3 call tests/test_against_legacy/data/cdr1as_anchors.sam   --genome tests/test_against_legacy/data/cdr1as_genome.fa   --name cdr1as_test   --prefix cdr1as_   --anchor 20   > cdr1as_splice_sites.bed
+```
 
-Internally, `find_circ3` has **two engines**, selected automatically based on the **QNAME format** in the anchor SAM:
+You should see a clear circular signal at the CDR1as locus.
 
-1. **Legacy engine (`legacy_call_iter`)**  
-   - Activated when the SAM QNAMEs look like **unmapped2anchors3 output**, e.g.  
-     `ERR2139486.12345_A__ACGT...` and `ERR2139486.12345_B`.
-   - This path is a **close, line-by-line port of `find_circ.py`** to Python 3.
-   - It uses the same breakpoint search, scoring, and classification logic.
-   - It writes optional stats and spliced-read FASTA files, just like the original.
+### 4.3 ERR2139486 chr21 subset (legacy regression)
 
-2. **Modern engine (HitAccumulator-based)**  
-   - Activated for simple QNAMEs (e.g. `read1`, `read2`), such as the `tiny.sam` fixture.
-   - Designed to be simpler and easier to extend while still reproducing the
-     expected behavior for these tests.
-
-The dispatcher lives in `run_find_circ`:
-
-- If the SAM file contains `_A__`, `_A`, or `_B` style legacy anchor labels → **use legacy engine**.  
-- Otherwise → **use modern engine**.
-
-This means:
-
-- For **real pipelines based on the original unmapped2anchors3**, you get
-  behavior extremely close to legacy `find_circ.py`.
-- For **test fixtures / plain SAM files**, you get behavior tuned for the
-  `tests/test_against_legacy` expectations.
-
----
-
-## 4. ERR2139486 chr21 regression: how close are we?
-
-A key integration test is the chr21 subset:
+In development, a chr21 subset of ERR2139486 was used to tune the legacy engine port. Running:
 
 ```bash
 TEST=tests/test_data/ERR2139486_chr21
 
-time find-circ3 call \
-  "$TEST/ERR2139486.anchors.sam" \
-  --genome tests/data/ref/chr21.fa \
-  --name ERR2139486_chr21 \
-  --prefix ERR2139486_ \
-  --anchor 20 \
-  > "$TEST/ERR2139486_splice_sites.bed"
+find-circ3 call   "$TEST/ERR2139486.anchors.sam"   --genome tests/data/ref/chr21.fa   --name ERR2139486_chr21   --prefix ERR2139486_   --anchor 20   > "$TEST/ERR2139486_splice_sites.bed"
 ```
 
-Compare against the original `find_circ.py` output using the helper script:
+produces **53/54** of the original junctions from the historical `find_circ.py` run on this subset. The missing junction is a very long circular candidate that spans most of chr21; everything else matches closely.
 
-```bash
-python2.7 tests/find_circ_py/cmp_bed.py \
-  "$TEST/ERR2139486_splice_sites_legacy.bed" \
-  "$TEST/ERR2139486_splice_sites.bed" \
-  | tail
-```
-
-With the current implementation you should see:
-
-- **53 / 54** junctions match exactly (coordinates + annotations).
-- The **canonical circRNA** on chr21 is reproduced perfectly:
-  - `chr21 33523435 33527305 ERR2139486_circ_000001 ... CIRCULAR,PERFECT_EXT,UNAMBIGUOUS_BP`
-- Exactly **one** legacy junction is missing in the new output:
-
-  ```text
-  MISSING chr21 39127938 46691128 ERR2139486_circ_000002  25  ...
-  ```
-
-This is a **single ultra-long circular junction** spanning ~7.6 Mb.
-
-### Why is that one circ missing?
-
-Because the new CLI applies `--max-intron 200000` by default:
-
-- span = `46691128 - 39127938 = 7,563,190 bp`  
-- `7,563,190 > 200,000` → filtered as “implausibly large circ”.
-
-If you want *strict, bit-for-bit legacy parity* for this dataset, you can simply relax the filter:
-
-```bash
-find-circ3 call \
-  "$TEST/ERR2139486.anchors.sam" \
-  --genome tests/data/ref/chr21.fa \
-  --name ERR2139486_chr21 \
-  --prefix ERR2139486_ \
-  --anchor 20 \
-  --max-intron 8000000 \
-  > "$TEST/ERR2139486_splice_sites_full.bed"
-```
-
-Then `cmp_bed.py` will report **54 / 54** overlapping junctions.
-
-In other words:
-
-- **Default behavior** = legacy-like, but with a *sane intron-length guard* for real data.  
-- **Parity mode** = raise `--max-intron` (or disable it) when you really want every long-range junction.
 
 ---
 
-## 5. Recommended defaults & knobs
+## 5. Engine behavior and compatibility notes
 
-For most practical runs:
+### 5.1 Two internal engines
 
-- `--anchor 20`  
-  Match the anchor size used by your anchor-generation step.
+`find_circ3 call` automatically chooses one of two internal engines:
 
-- `--min-as-xs 2`  
-  (Default) Use an AS–XS margin of 2 to mark anchors as “unique enough”.  
-  This maps directly onto the legacy `min_uniq_qual` behavior.
+1. **Legacy engine** (default for “real” anchors):
+   - Triggered when QNAMEs look like `*_A__SEQ` / `*_B` (output of `find-circ3 anchors` or original `unmapped2anchors.py`).
+   - Uses a faithful Python 3 port of `find_circ.py` (including breakpoint scanning, AS/XS‑based uniqueness, and category labels).
+   - Used for real data and regression tests (CDR1as, ERR2139486 chr21).
 
-- `--max-intron 200000`  
-  Practical upper bound for intron length to avoid bizarre ultra-long candidates.  
-  Increase only if you know what you’re doing.
+2. **Modern HitAccumulator engine** (for simple SAM fixtures):
+   - Triggered when input SAM/BAM has plain QNAMEs and no legacy anchor labels.
+   - Used mainly for small synthetic tests like `tiny.sam`, where anchors are already “baked in”.
 
-- `--min-support 2` or higher  
-  For noisy real-world data, requiring at least 2 supporting reads is often reasonable.
+You generally do not need to care which engine is used – the choice is automatic based on QNAME patterns.
 
-- `--allow-non-canonical`  
-  Only enable if your biology / alignment strategy genuinely suggests non-GT/AG junctions are interesting; otherwise you’ll greatly increase ambiguity.
+### 5.2 Things to avoid
+
+- **Do not use `--no-unal` on the primary mapping.**  
+  You *need* the unmapped reads to feed into `find-circ3 anchors`.
+
+- **Do not feed primary alignment SAM/BAM directly into `find-circ3 call`.**  
+  `find-circ3 call` expects **anchor alignments**, not arbitrary primary mappings.
+
+- **Do not change the anchor size between steps.**  
+  `--anchor` in `find-circ3 anchors` and `find-circ3 call` must match.
+
 
 ---
 
-## 6. Running the test suite
+## 6. Development and tests
 
-Before and after major code changes, always run:
+To run the tests (including legacy regressions):
 
 ```bash
 pytest -q
 ```
 
-Key tests:
+The test suite covers:
 
-- `tests/test_against_legacy/test_regression.py`  
-  - `test_cli_tiny_sam_matches_expected`  
-  - `test_cli_cdr1as_emits_circular_junctions`
+- CLI regression on a tiny synthetic example.
+- CLI regression on the CDR1as locus.
+- Legacy breakpoint logic.
+- Anchors CLI behavior.
+- Legacy regression on ERR2139486 chr21 (large test, may be xfailed or omitted in CI).
 
-- `tests/test_breakpoints.py`  
-  Unit tests for breakpoint logic and motif handling.
-
-- `tests/test_anchors_cli.py`  
-  Sanity checks for `find-circ3 anchors`.
-
-- `tests/test_integration_bam_anchors_call.py`  
-  An integration test currently marked **xfail** by design.
-
-If these are green, you’re still on the rails and not falling into the rabbit hole.
 
 ---
 
-## 7. Development notes / gotchas
+## 7. License and attribution
 
-1. **Legacy vs modern engine**
-   - If you change how QNAMEs are parsed (`_A__`, `_A`, `_B`), re-run:
-     - `tests/test_against_legacy/test_regression.py`
-     - chr21 regression (`cmp_bed.py`) to ensure nothing broke.
+- The original `find_circ.py` (c) Marvin Jens, 2012–2015.  
+- `find_circ3` re‑implements that logic in Python 3, with additional tests and infrastructure for modern workflows.
 
-2. **Read reconstruction**
-   - The legacy engine tries to reconstruct the original read sequence in this order:
-     1. QNAME-embedded sequence (`READ_A__SEQ`),
-     2. `A.query_sequence`,
-     3. `B.query_sequence`.
-   - If you alter how anchors are named, make sure this logic still works.
-
-3. **Anchors alignment**
-   - Avoid casually adding `--no-unal` or other aggressive filters to the **anchor**-alignment step; it can silently drop informative anchors and make debugging harder.
-   - Keep alignment parameters close to those used in tests when in doubt.
-
-4. **New filters**
-   - Any new filter (MAPQ thresholds, span limits, motif constraints, etc.) should be *off by default* or carefully documented and accompanied by regression updates.
-
-5. **When in doubt: re-run chr21**
-   - The chr21 subset (`ERR2139486_chr21`) plus `cmp_bed.py` is a practical regression test for real-world-like data.
-   - If you refactor core logic and chr21 stays at “53/54 with only the 7.6 Mb circ missing by max-intron” (or “54/54” if you relax `--max-intron`), you’re still aligned with the original design.
-
----
-
-## 8. Citation / provenance
-
-This project reimplements and modernizes the original **find_circ.py**:
-
-- Marvin Jens et al., 2013: the first **find_circ** circular RNA detection pipeline.
-
-If you use `find_circ3` in a publication, please cite the original find_circ paper and, if appropriate, this repository.
-
----
-
-Happy circ hunting, and may your anchors be unique and your junctions canonical (unless you really want them not to be). 🧬
+Please cite the original **find_circ** paper and Marvin Jens’ work when using this tool in publications.
